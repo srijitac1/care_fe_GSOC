@@ -1,9 +1,10 @@
 /* eslint-disable i18next/no-literal-string */
 import { useMutation } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, ChevronRight, Upload } from "lucide-react";
+import { AlertCircle, CheckCircle, ChevronDown, ChevronRight, Upload, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -126,7 +127,26 @@ export default function LocationImport({ facilityId }: LocationImportProps) {
     "upload",
   );
   const [uploadError, setUploadError] = useState<string>("");
-  const { saveLocations } = useSaveLocations(facilityId);
+  const { saveLocations, progress, isSaving } = useSaveLocations(facilityId);
+
+  // Show success/failure toast when import completes
+  useEffect(() => {
+    if (progress.isComplete) {
+      if (progress.failed === 0) {
+        toast.success(
+          `Successfully imported ${progress.processed} location${progress.processed !== 1 ? "s" : ""}`,
+        );
+      } else if (progress.processed === progress.failed) {
+        toast.error(
+          `Failed to import all ${progress.failed} location${progress.failed !== 1 ? "s" : ""}`,
+        );
+      } else {
+        toast.warning(
+          `Imported ${progress.processed - progress.failed} location${progress.processed - progress.failed !== 1 ? "s" : ""}, ${progress.failed} failed`,
+        );
+      }
+    }
+  }, [progress.isComplete, progress.processed, progress.failed]);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -282,20 +302,120 @@ Main Building,building,Main hospital building,Reception,room,Main reception area
             Review and validate locations before importing
           </CardDescription>
           <div className="mt-4">
-            <Progress value={100} className="h-2" />
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-600">
+                {progress.total > 0
+                  ? `Processing: ${progress.processed} / ${progress.total} locations`
+                  : "Ready to import"}
+              </span>
+              {progress.total > 0 && (
+                <span className="text-sm font-medium">
+                  {Math.round((progress.processed / progress.total) * 100)}%
+                </span>
+              )}
+            </div>
+            <Progress
+              value={
+                progress.total > 0
+                  ? (progress.processed / progress.total) * 100
+                  : 0
+              }
+              className="h-2"
+            />
           </div>
         </CardHeader>
         <CardContent>
+          {/* Success Banner */}
+          {progress.isComplete && progress.failed === 0 && (
+            <Alert className="mb-4 border-green-200 bg-green-50">
+              <CheckCircle className="h-4 w-4 text-green-600" />
+              <AlertTitle className="text-green-900">
+                Import Successful
+              </AlertTitle>
+              <AlertDescription className="text-green-700">
+                All {progress.processed} location
+                {progress.processed !== 1 ? "s" : ""} have been imported
+                successfully.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Partial Success Banner */}
+          {progress.isComplete &&
+            progress.failed > 0 &&
+            progress.processed > progress.failed && (
+              <Alert className="mb-4 border-yellow-200 bg-yellow-50">
+                <AlertCircle className="h-4 w-4 text-yellow-600" />
+                <AlertTitle className="text-yellow-900">
+                  Partial Import Success
+                </AlertTitle>
+                <AlertDescription className="text-yellow-700">
+                  {progress.processed - progress.failed} location
+                  {progress.processed - progress.failed !== 1 ? "s" : ""}{" "}
+                  imported successfully, but {progress.failed} failed.
+                </AlertDescription>
+              </Alert>
+            )}
+
+          {/* Failure Banner */}
+          {progress.isComplete && progress.processed === progress.failed && (
+            <Alert variant="destructive" className="mb-4">
+              <XCircle className="h-4 w-4" />
+              <AlertTitle>Import Failed</AlertTitle>
+              <AlertDescription>
+                All {progress.failed} location{progress.failed !== 1 ? "s" : ""}{" "}
+                failed to import.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Error Details */}
+          {progress.errors.length > 0 && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Import Errors</AlertTitle>
+              <AlertDescription>
+                <ul className="mt-2 space-y-1 list-disc list-inside">
+                  {progress.errors.slice(0, 5).map((error, index) => (
+                    <li key={index} className="text-sm">
+                      <strong>{error.location}:</strong> {error.error}
+                    </li>
+                  ))}
+                  {progress.errors.length > 5 && (
+                    <li className="text-sm">
+                      ... and {progress.errors.length - 5} more errors
+                    </li>
+                  )}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
+
           <div>
             <h3 className="text-lg font-semibold mb-4">Review All Locations</h3>
             <HierarchicalLocationPreview locations={processedLocations} />
           </div>
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setCurrentStep("upload");
+                setProcessedLocations([]);
+              }}
+              disabled={isSaving}
+            >
+              Cancel
+            </Button>
             <Button
               className="mt-4"
               onClick={() => saveLocations(processedLocations)}
+              disabled={isSaving || progress.isComplete}
             >
-              Save
+              {isSaving
+                ? "Saving..."
+                : progress.isComplete
+                  ? "Import Complete"
+                  : "Save"}
             </Button>
           </div>
         </CardContent>
@@ -490,37 +610,90 @@ interface QueueItem {
   nodes: LocationImportT[];
 }
 
+interface SaveProgress {
+  total: number;
+  processed: number;
+  failed: number;
+  isComplete: boolean;
+  errors: Array<{ location: string; error: string }>;
+}
+
 export function useSaveLocations(facilityId: string) {
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [progress, setProgress] = useState<SaveProgress>({
+    total: 0,
+    processed: 0,
+    failed: 0,
+    isComplete: false,
+    errors: [],
+  });
 
-  const { mutate: submitBatch } = useMutation({
+  const { mutate: submitBatch, isPending } = useMutation({
     mutationFn: mutate(batchApi.batchRequest),
     onSuccess: (data) => {
       const res = data as BatchRequestResponse<LocationDetail>;
+      
+      // Track failures
+      const failures = res.results.filter((r) => r.status !== 201);
+      
+      setProgress((prev) => ({
+        ...prev,
+        processed: prev.processed + res.results.length,
+        failed: prev.failed + failures.length,
+        errors: [
+          ...prev.errors,
+          ...failures.map((f, index) => ({
+            location: queue[0]?.nodes[index]?.name || "Unknown",
+            error: f.error || "Unknown error",
+          })),
+        ],
+      }));
+
       setQueue((prev) => {
         if (prev.length === 0) return prev;
 
         // dequeue the processed item
         const [completed, ...rest] = prev;
 
-        // map results back to children
-        const children: QueueItem[] = res.results.map((r, index) => ({
-          parentId: r.data?.id,
-          nodes: completed.nodes[index].children,
-        }));
+        // map results back to children (only for successful ones)
+        const children: QueueItem[] = res.results
+          .filter((r) => r.status === 201)
+          .map((r, index) => ({
+            parentId: r.data?.id,
+            nodes: completed.nodes[index].children,
+          }));
 
         return [...rest, ...children];
       });
     },
     onError: (error) => {
       console.error("Batch submission failed:", error);
+      setProgress((prev) => ({
+        ...prev,
+        failed: prev.failed + (queue[0]?.nodes.length || 0),
+        errors: [
+          ...prev.errors,
+          {
+            location: "Batch request",
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
+        ],
+      }));
+      // Clear queue on critical error
+      setQueue([]);
     },
   });
 
   // Effect: process the next batch whenever the queue changes
   useEffect(() => {
     console.log("Processing queue:", queue);
-    if (queue.length === 0) return;
+    if (queue.length === 0) {
+      // Mark as complete when queue is empty and we've started processing
+      if (progress.total > 0 && !progress.isComplete) {
+        setProgress((prev) => ({ ...prev, isComplete: true }));
+      }
+      return;
+    }
 
     const { parentId, nodes: allNodes } = queue[0];
 
@@ -571,13 +744,21 @@ export function useSaveLocations(facilityId: string) {
     };
 
     submitBatch(batchRequest);
-  }, [queue, facilityId, submitBatch]);
+  }, [queue, facilityId, submitBatch, progress.total, progress.isComplete]);
 
   // Entry point: start the saving process
   const saveLocations = useCallback((roots: LocationImportT[]) => {
     console.log("Saving locations:", roots);
+    const total = countTotalLocations(roots);
+    setProgress({
+      total,
+      processed: 0,
+      failed: 0,
+      isComplete: false,
+      errors: [],
+    });
     setQueue([{ parentId: undefined, nodes: roots }]);
   }, []);
 
-  return { saveLocations, queue };
+  return { saveLocations, queue, progress, isSaving: isPending };
 }
